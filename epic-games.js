@@ -3,7 +3,7 @@ import { authenticator } from 'otplib';
 import chalk from 'chalk';
 import path from 'path';
 import { existsSync, writeFileSync, appendFileSync } from 'fs';
-import { resolve, jsonDb, datetime, stealth, filenamify, prompt, notify, html_game_list, handleSIGINT } from './src/util.js';
+import { resolve, jsonDb, datetime, stealth, filenamify, prompt, notify, notifyGame, html_game_list, handleSIGINT } from './src/util.js';
 import { cfg } from './src/config.js';
 
 const screenshot = (...a) => resolve(cfg.dir.screenshots, 'epic-games', ...a);
@@ -190,6 +190,12 @@ try {
     } else {
       title = await page.locator('h1').first().innerText();
     }
+    let image = null;
+    try {
+      image = await page.getAttribute('meta[property="og:image"]', 'content');
+    } catch (_) {
+      image = null;
+    }
     const game_id = page.url().split('/').pop();
     const existedInDb = db.data[user][game_id];
     db.data[user][game_id] ||= { title, time: datetime(), url: page.url() }; // this will be set on the initial run only!
@@ -200,10 +206,22 @@ try {
 
     if (btnText == 'in library') {
       console.log('  Already in library! Nothing to claim.');
-      if (!existedInDb) await notify(`Game already in library: ${url}`);
+    
+      if (!existedInDb) {
+        await notifyGame({
+          store: 'Epic Games',
+          title,
+          url,
+          image,
+          status: 'already_owned',
+          user,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    
       notify_game.status = 'existed';
-      db.data[user][game_id].status ||= 'existed'; // does not overwrite claimed or failed
-      if (db.data[user][game_id].status.startsWith('failed')) db.data[user][game_id].status = 'manual'; // was failed but now it's claimed
+      db.data[user][game_id].status ||= 'existed';
+      if (db.data[user][game_id].status.startsWith('failed')) db.data[user][game_id].status = 'manual';
     } else if (btnText == 'requires base game') {
       console.log('  Requires base game! Nothing to claim.');
       notify_game.status = 'requires base game';
@@ -291,6 +309,15 @@ try {
         db.data[user][game_id].status = 'claimed';
         db.data[user][game_id].time = datetime(); // claimed time overwrites failed/dryrun time
         console.log('  Claimed successfully!');
+        await notifyGame({
+          store: 'Epic Games',
+          title,
+          url,
+          image,
+          status: 'claimed',
+          user,
+          timestamp: new Date().toISOString(),
+        });
         // context.setDefaultTimeout(cfg.timeout);
       } catch (e) {
         console.log(e);
@@ -315,8 +342,8 @@ try {
   if (error.message && process.exitCode != 130) notify(`epic-games failed: ${error.message.split('\n')[0]}`);
 } finally {
   await db.write(); // write out json db
-  if (notify_games.filter(g => g.status == 'claimed' || g.status == 'failed').length) { // don't notify if all have status 'existed', 'manual', 'requires base game', 'unavailable-in-region', 'skipped'
-    notify(`epic-games (${user}):<br>${html_game_list(notify_games)}`);
+  if (notify_games.filter(g => g.status === 'failed').length) {
+    await notify(`epic-games (${user}):<br>${html_game_list(notify_games.filter(g => g.status === 'failed'))}`);
   }
 }
 if (cfg.debug) writeFileSync(path.resolve(cfg.dir.browser, 'cookies.json'), JSON.stringify(await context.cookies()));

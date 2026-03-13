@@ -107,31 +107,164 @@ export const prompt = o => enquirer.prompt({ name: 'name', type: 'input', messag
 export const confirm = o => prompt({ type: 'confirm', message: 'Continue?', ...o });
 
 // notifications via apprise CLI
-import { execFile } from 'child_process';
 import { cfg } from './config.js';
 
-export const notify = html => new Promise((resolve, reject) => {
+export const notify = async (html) => {
   if (!cfg.notify) {
     if (cfg.debug) console.debug('notify: NOTIFY is not set!');
-    return resolve();
+    return;
   }
-  // const cmd = `apprise '${cfg.notify}' ${title} -i html -b '${html}'`; // this had problems if e.g. ' was used in arg; could have `npm i shell-escape`, but instead using safer execFile which takes args as array instead of exec which spawned a shell to execute the command
-  const args = [cfg.notify, '-i', 'html', '-b', `'${html}'`];
-  if (cfg.notify_title) args.push(...['-t', cfg.notify_title]);
-  if (cfg.debug) console.debug(`apprise ${args.map(a => `'${a}'`).join(' ')}`); // this also doesn't escape, but it's just for info
-  execFile('apprise', args, (error, stdout, stderr) => {
-    if (error) {
-      console.log(`error: ${error.message}`);
-      if (error.message.includes('command not found')) {
-        console.info('Run `pip install apprise`. See https://github.com/vogler/free-games-claimer#notifications');
-      }
-      return reject(error);
-    }
-    if (stderr) console.error(`stderr: ${stderr}`);
-    if (stdout) console.log(`stdout: ${stdout}`);
-    resolve();
+
+  // Expect cfg.notify to now be a normal Discord webhook URL:
+  // https://discord.com/api/webhooks/{id}/{token}
+  if (!cfg.notify.startsWith('https://discord.com/api/webhooks/')) {
+    console.error('notify: NOTIFY must be a Discord webhook URL, not an apprise URI.');
+    return;
+  }
+
+  const description = String(html ?? '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<li>/gi, '• ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim()
+    .slice(0, 4000); // Discord embed description max is 4096
+
+  if (!description) {
+    if (cfg.debug) console.debug('notify: empty message after HTML cleanup, skipping.');
+    return;
+  }
+
+  const lower = description.toLowerCase();
+
+  let color = 0x5865f2; // default blurple
+  if (lower.includes('claimed')) color = 0x57f287;           // green
+  else if (lower.includes('failed')) color = 0xed4245;       // red
+  else if (lower.includes('captcha')) color = 0xfee75c;      // yellow
+  else if (lower.includes('not signed in')) color = 0xfaa61a; // orange
+  else if (lower.includes('already in library')) color = 0x747f8d; // gray
+
+  const payload = {
+    username: 'Free Game Bot',
+    embeds: [
+      {
+        title: cfg.notify_title || 'MXN Free Games Claimer',
+        description,
+        color,
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  };
+
+  if (cfg.debug) {
+    console.debug(`discord webhook notify -> ${cfg.notify}`);
+    console.debug(JSON.stringify(payload, null, 2));
+  }
+
+  const response = await fetch(cfg.notify, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
   });
-});
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Discord webhook failed: ${response.status} ${response.statusText} ${text}`);
+  }
+};
+
+export const notifyGame = async ({
+  store,
+  title,
+  url,
+  image,
+  status,
+  user,
+  timestamp,
+}) => {
+  if (!cfg.notify) {
+    if (cfg.debug) console.debug('notifyGame: NOTIFY is not set!');
+    return;
+  }
+
+  if (!cfg.notify.startsWith('https://discord.com/api/webhooks/')) {
+    console.error('notifyGame: NOTIFY must be a Discord webhook URL.');
+    return;
+  }
+
+  const normalizedStatus = status === 'claimed'
+    ? 'Claimed'
+    : status === 'existed' || status === 'already_owned'
+      ? 'Already Owned'
+      : status || 'Unknown';
+
+  const color =
+    status === 'claimed' ? 0x57f287 :
+    status === 'existed' || status === 'already_owned' ? 0x747f8d :
+    0x5865f2;
+
+  const payload = {
+    username: 'Free Game Bot',
+    embeds: [
+      {
+        title: title || 'Free Game',
+        url: url || undefined,
+        color,
+        description: `${normalizedStatus} on **${store}**`,
+        fields: [
+          {
+            name: 'Store',
+            value: store || 'Unknown',
+            inline: true,
+          },
+          {
+            name: 'Status',
+            value: normalizedStatus,
+            inline: true,
+          },
+          {
+            name: 'Account',
+            value: user || 'Unknown',
+            inline: true,
+          },
+          ...(url ? [{
+            name: 'Game Link',
+            value: `[Open Store Page](${url})`,
+            inline: false,
+          }] : []),
+        ],
+        image: image ? { url: image } : undefined,
+        timestamp: timestamp || new Date().toISOString(),
+        footer: {
+          text: cfg.notify_title || 'MXN Free Games Claimer',
+        },
+      },
+    ],
+  };
+
+  if (cfg.debug) {
+    console.debug('notifyGame payload:', JSON.stringify(payload, null, 2));
+  }
+
+  const response = await fetch(cfg.notify, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Discord webhook failed: ${response.status} ${response.statusText} ${text}`);
+  }
+};
 
 export const escapeHtml = unsafe => unsafe.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll('\'', '&#039;');
 
