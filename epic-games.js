@@ -11,6 +11,63 @@ const screenshot = (...a) => resolve(cfg.dir.screenshots, 'epic-games', ...a);
 const URL_CLAIM = 'https://store.epicgames.com/en-US/free-games';
 const URL_LOGIN = 'https://www.epicgames.com/id/login?lang=en-US&noHostRedirect=true&redirectUrl=' + URL_CLAIM;
 
+
+const AUD_FORMATTER = new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' });
+const OWNED_STATUSES = new Set(['claimed', 'existed', 'manual']);
+
+const parsePriceAud = rawPrice => {
+  if (!rawPrice) return null;
+  const normalized = rawPrice
+    .replace(/\s+/g, '')
+    .replace(/,/g, '')
+    .replace(/A\$/gi, '')
+    .replace(/AUD/gi, '');
+  const value = Number.parseFloat(normalized);
+  return Number.isFinite(value) ? value : null;
+};
+
+const extractPriceAud = async page => {
+  const ldJsonPrices = await page.locator('script[type="application/ld+json"]').evaluateAll(nodes => {
+    const prices = [];
+    const toArray = v => Array.isArray(v) ? v : [v];
+    const walk = obj => {
+      if (!obj || typeof obj !== 'object') return;
+      for (const offer of toArray(obj.offers)) {
+        if (!offer || typeof offer !== 'object') continue;
+        const currency = String(offer.priceCurrency || '').toUpperCase();
+        if (currency !== 'AUD') continue;
+        const price = Number.parseFloat(String(offer.price ?? '').replace(/,/g, ''));
+        if (Number.isFinite(price)) prices.push(price);
+      }
+      for (const key of ['hasPart', 'itemListElement', 'mainEntity', 'mainEntityOfPage']) {
+        for (const nested of toArray(obj[key])) walk(nested);
+      }
+    };
+
+    for (const node of nodes) {
+      const txt = node.textContent || '';
+      if (!txt.trim()) continue;
+      try {
+        walk(JSON.parse(txt));
+      } catch (_) {
+        continue;
+      }
+    }
+    return prices;
+  }).catch(() => []);
+
+  if (ldJsonPrices.length) return ldJsonPrices[0];
+
+  const visiblePrice = await page.locator('aside').first().innerText()
+    .then(t => t.match(/A\$\s*[\d,.]+/i)?.[0] || null)
+    .catch(() => null);
+
+  return parsePriceAud(visiblePrice);
+};
+
+const totalOwnedAud = userGames => Object.values(userGames || {})
+  .filter(game => OWNED_STATUSES.has(game.status) && Number.isFinite(game.priceAudValue))
+  .reduce((sum, game) => sum + game.priceAudValue, 0);
 console.log(datetime(), 'started checking epic-games');
 
 const db = await jsonDb('epic-games.json', {});
@@ -196,17 +253,25 @@ try {
     } catch (_) {
       image = null;
     }
+    const priceAudValue = await extractPriceAud(page);
+    const priceAud = Number.isFinite(priceAudValue) ? AUD_FORMATTER.format(priceAudValue) : null;
     const game_id = page.url().split('/').pop();
     const existedInDb = db.data[user][game_id];
     db.data[user][game_id] ||= { title, time: datetime(), url: page.url() }; // this will be set on the initial run only!
+    if (Number.isFinite(priceAudValue)) db.data[user][game_id].priceAudValue = priceAudValue;
     console.log('Current free game:', chalk.blue(title));
     if (bundle_includes) console.log('  This bundle includes:', bundle_includes);
+    if (priceAud) console.log('  Original price:', priceAud);
     const notify_game = { title, url, status: 'failed' };
     notify_games.push(notify_game); // status is updated below
 
     if (btnText == 'in library') {
       console.log('  Already in library! Nothing to claim.');
-    
+
+      db.data[user][game_id].status ||= 'existed';
+      if (db.data[user][game_id].status.startsWith('failed')) db.data[user][game_id].status = 'manual';
+      const totalStolenAud = AUD_FORMATTER.format(totalOwnedAud(db.data[user]));
+
       if (!existedInDb) {
         await notifyGame({
           store: 'Epic Games',
@@ -216,12 +281,12 @@ try {
           status: 'already_owned',
           user,
           timestamp: new Date().toISOString(),
+          priceAud,
+          totalStolenAud,
         });
       }
-    
+
       notify_game.status = 'existed';
-      db.data[user][game_id].status ||= 'existed';
-      if (db.data[user][game_id].status.startsWith('failed')) db.data[user][game_id].status = 'manual';
     } else if (btnText == 'requires base game') {
       console.log('  Requires base game! Nothing to claim.');
       notify_game.status = 'requires base game';
@@ -309,6 +374,7 @@ try {
         db.data[user][game_id].status = 'claimed';
         db.data[user][game_id].time = datetime(); // claimed time overwrites failed/dryrun time
         console.log('  Claimed successfully!');
+        const totalStolenAud = AUD_FORMATTER.format(totalOwnedAud(db.data[user]));
         await notifyGame({
           store: 'Epic Games',
           title,
@@ -317,6 +383,8 @@ try {
           status: 'claimed',
           user,
           timestamp: new Date().toISOString(),
+          priceAud,
+          totalStolenAud,
         });
         // context.setDefaultTimeout(cfg.timeout);
       } catch (e) {

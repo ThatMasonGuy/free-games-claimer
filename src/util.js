@@ -187,6 +187,8 @@ export const notifyGame = async ({
   status,
   user,
   timestamp,
+  priceAud,
+  totalStolenAud,
 }) => {
   if (!cfg.notify) {
     if (cfg.debug) console.debug('notifyGame: NOTIFY is not set!');
@@ -233,6 +235,11 @@ export const notifyGame = async ({
             value: user || 'Unknown',
             inline: true,
           },
+          ...(priceAud ? [{
+            name: 'Original Price',
+            value: priceAud,
+            inline: true,
+          }] : []),
           ...(url ? [{
             name: 'Game Link',
             value: `[Open Store Page](${url})`,
@@ -242,7 +249,9 @@ export const notifyGame = async ({
         image: image ? { url: image } : undefined,
         timestamp: timestamp || new Date().toISOString(),
         footer: {
-          text: cfg.notify_title || 'MXN Free Games Claimer',
+          text: totalStolenAud
+            ? `${cfg.notify_title || 'MXN Free Games Claimer'} • Total stolen: ${totalStolenAud}`
+            : cfg.notify_title || 'MXN Free Games Claimer',
         },
       },
     ],
